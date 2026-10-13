@@ -45,5 +45,9 @@
 	<true/>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
+	<key>NSCameraUsageDescription</key>
+	<string>Doctor Chile necesita acceso a la cámara para fotografiar las hojas de chile y detectar plagas o enfermedades.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Doctor Chile necesita acceso a su galería para analizar fotografías de hojas de chile guardadas en su dispositivo.</string>
 </dict>
 </plist>
