@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  analyze_and_test:
+    name: Analizar y Probar (Flutter)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Clonar repositorio
+        uses: actions/checkout@v4
+
+      - name: Instalar dependencias de sistema para SQLite FFI en Linux
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsqlite3-0 libsqlite3-dev
+
+      - name: Configurar Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          cache: true
+
+      - name: Instalar paquetes Dart/Flutter
+        run: flutter pub get
+
+      - name: Verificar análisis estático
+        run: flutter analyze --fatal-infos
+
+      - name: Ejecutar suite de pruebas
+        run: flutter test

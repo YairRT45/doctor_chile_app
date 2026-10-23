@@ -3,7 +3,11 @@ import 'package:flutter/material.dart';
 
 import '../../../core/constants/chili_classes.dart';
 import '../../../core/database/local_database.dart';
+import '../../../core/errors/app_errors.dart';
+import '../../../core/widgets/descargo_responsabilidad.dart';
 import '../domain/diagnosis_record.dart';
+import '../domain/diagnosis_repository.dart';
+import '../domain/estado_resultado.dart';
 import '../services/yolo_service.dart';
 
 /// Pantalla de resultados de un diagnóstico recién analizado (CU-01 FN.5).
@@ -11,10 +15,19 @@ class ResultScreen extends StatefulWidget {
   final String imagePath;
   final YoloPredictionResult resultado;
 
+  /// Repositorio de persistencia. Por defecto SQLite; se puede inyectar un
+  /// doble en pruebas.
+  final DiagnosisRepository? repositorio;
+
+  /// Abre el historial. Si se proporciona, tras guardar aparece "Ver historial".
+  final VoidCallback? onVerHistorial;
+
   const ResultScreen({
     super.key,
     required this.imagePath,
     required this.resultado,
+    this.repositorio,
+    this.onVerHistorial,
   });
 
   @override
@@ -26,35 +39,97 @@ class _ResultScreenState extends State<ResultScreen> {
   bool _guardando = false;
   bool _yaGuardado = false;
 
+  DiagnosisRepository get _repo => widget.repositorio ?? LocalDatabase.instance;
+
+  /// Pide confirmación antes de descartar un resultado que no se ha guardado.
+  Future<bool> _confirmarSalirSinGuardar() async {
+    final salir = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Salir sin guardar'),
+        content: const Text(
+          'Este resultado aún no está guardado en el historial. '
+          'Si sale ahora, se perderá.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Seguir aquí'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: Colors.red.shade700),
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Salir sin guardar'),
+          ),
+        ],
+      ),
+    );
+    return salir == true;
+  }
+
   @override
   void dispose() {
     _notasController.dispose();
     super.dispose();
   }
 
+  /// Un resultado que no es una hoja pide confirmación antes de guardarse para
+  /// no llenar el historial con fotografías sin sentido.
+  Future<bool> _confirmarGuardadoNoHoja() async {
+    final confirmar = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Guardar de todos modos'),
+        content: const Text(
+          'La imagen no parece contener una hoja de chile. Si la guarda, '
+          'quedará marcada como "No parece una hoja" en el historial.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancelar'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Guardar'),
+          ),
+        ],
+      ),
+    );
+    return confirmar == true;
+  }
+
   Future<void> _guardarDiagnostico() async {
     if (_guardando || _yaGuardado) return;
 
+    if (widget.resultado.estado == EstadoResultado.noEsHoja) {
+      if (!await _confirmarGuardadoNoHoja()) return;
+      if (!mounted) return;
+    }
+
     setState(() => _guardando = true);
 
+    String? rutaCopiada;
     try {
       // 1. Copiar la foto a la carpeta permanente de la app
-      final rutaPermanente = await LocalDatabase.instance.guardarImagenPermanente(
+      rutaCopiada = await _repo.guardarImagenPermanente(
         widget.imagePath,
       );
 
       final clase = widget.resultado.claseGanadora;
       final registro = DiagnosisRecord(
-        imagePath: rutaPermanente,
+        imagePath: rutaCopiada,
         diseaseKey: clase.key,
         diseaseName: clase.nombreEspanol,
         confidence: widget.resultado.confianza,
         createdAt: DateTime.now(),
         notes: _notasController.text.trim().isEmpty ? null : _notasController.text.trim(),
+        estado: widget.resultado.estado,
+        modelVersion: widget.resultado.versionModelo,
       );
 
       // 2. Insertar en SQLite local validando BR-01 y BR-02
-      final idGenerado = await LocalDatabase.instance.insertarDiagnostico(registro);
+      final idGenerado = await _repo.insertarDiagnostico(registro);
 
       if (!mounted) return;
       setState(() {
@@ -68,13 +143,23 @@ class _ResultScreenState extends State<ResultScreen> {
           content: Text('Diagnóstico #$idGenerado guardado correctamente (Modo Offline).'),
         ),
       );
-    } catch (e) {
+    } catch (e, st) {
+      registrarError(e, st, 'Error al guardar el diagnóstico');
+      // Si la foto ya se copió pero el registro no se guardó, no dejar la copia huérfana.
+      if (rutaCopiada != null) {
+        await _repo.descartarImagen(rutaCopiada);
+      }
       if (!mounted) return;
       setState(() => _guardando = false);
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           backgroundColor: Colors.red.shade700,
-          content: Text('Error al guardar el diagnóstico: $e'),
+          content: Text(
+            mensajeAmigable(
+              e,
+              porDefecto: 'No se pudo guardar el diagnóstico. Intente de nuevo.',
+            ),
+          ),
         ),
       );
     }
@@ -85,12 +170,39 @@ class _ResultScreenState extends State<ResultScreen> {
     final res = widget.resultado;
     final ganadora = res.claseGanadora;
     final porcentaje = (res.confianza * 100).toStringAsFixed(1);
+    final concluyente = res.esConcluyente;
+    final noEsHoja = res.estado == EstadoResultado.noEsHoja;
+
+    // Un resultado dudoso usa un color neutro: no debe parecer un diagnóstico firme.
+    final colorTarjeta = concluyente ? ganadora.colorIndicador : Colors.blueGrey.shade600;
 
     // Ordenar las 5 clases de mayor a menor probabilidad
     final desgloseOrdenado = res.probabilidadesPorClase.entries.toList()
       ..sort((a, b) => b.value.compareTo(a.value));
 
-    return Scaffold(
+    final String etiquetaSuperior;
+    final String tituloPrincipal;
+    switch (res.estado) {
+      case EstadoResultado.concluyente:
+        etiquetaSuperior = ganadora.esSana ? 'ESTADO SALUDABLE' : 'AFECCIÓN DETECTADA';
+        tituloPrincipal = ganadora.nombreEspanol;
+      case EstadoResultado.pocaConfianza:
+        etiquetaSuperior = 'RESULTADO NO CONCLUYENTE';
+        tituloPrincipal = 'Posible: ${ganadora.nombreEspanol}';
+      case EstadoResultado.noEsHoja:
+        etiquetaSuperior = 'NO PARECE UNA HOJA DE CHILE';
+        tituloPrincipal = 'Sin diagnóstico fiable';
+    }
+
+    return PopScope(
+      // Si ya se guardó se puede salir libremente; si no, se pide confirmación.
+      canPop: _yaGuardado,
+      onPopInvokedWithResult: (didPop, _) async {
+        if (didPop) return;
+        final salir = await _confirmarSalirSinGuardar();
+        if (salir && context.mounted) Navigator.of(context).pop();
+      },
+      child: Scaffold(
       appBar: AppBar(
         title: const Text('Resultado del Diagnóstico'),
       ),
@@ -107,13 +219,19 @@ class _ResultScreenState extends State<ResultScreen> {
                 child: Image.file(
                   File(widget.imagePath),
                   fit: BoxFit.cover,
+                  errorBuilder: (_, __, ___) => Container(
+                    color: Colors.grey.shade200,
+                    child: const Center(
+                      child: Icon(Icons.broken_image_outlined, size: 64),
+                    ),
+                  ),
                 ),
               ),
             ),
             const SizedBox(height: 16),
 
             // 2. Alerta si la imagen no parece hoja o tiene baja confianza
-            if (!res.esConcluyente && res.mensajeAdvertencia != null) ...[
+            if (!concluyente && res.mensajeAdvertencia != null) ...[
               Container(
                 padding: const EdgeInsets.all(14),
                 decoration: BoxDecoration(
@@ -144,10 +262,10 @@ class _ResultScreenState extends State<ResultScreen> {
 
             // 3. Tarjeta principal con el diagnóstico detectado
             Card(
-              elevation: 2,
+              elevation: concluyente ? 2 : 0,
               shape: RoundedRectangleBorder(
                 borderRadius: BorderRadius.circular(16),
-                side: BorderSide(color: ganadora.colorIndicador.withValues(alpha: 0.5), width: 1.5),
+                side: BorderSide(color: colorTarjeta.withValues(alpha: 0.5), width: 1.5),
               ),
               child: Padding(
                 padding: const EdgeInsets.all(18),
@@ -158,10 +276,10 @@ class _ResultScreenState extends State<ResultScreen> {
                       children: [
                         CircleAvatar(
                           radius: 26,
-                          backgroundColor: ganadora.colorIndicador.withValues(alpha: 0.15),
+                          backgroundColor: colorTarjeta.withValues(alpha: 0.15),
                           child: Icon(
-                            ganadora.icono,
-                            color: ganadora.colorIndicador,
+                            concluyente ? ganadora.icono : Icons.help_outline_rounded,
+                            color: colorTarjeta,
                             size: 30,
                           ),
                         ),
@@ -171,30 +289,32 @@ class _ResultScreenState extends State<ResultScreen> {
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
                               Text(
-                                ganadora.esSana ? 'ESTADO SALUDABLE' : 'AFECCIÓN DETECTADA',
+                                etiquetaSuperior,
                                 style: TextStyle(
                                   fontSize: 12,
                                   fontWeight: FontWeight.bold,
                                   letterSpacing: 0.8,
-                                  color: ganadora.colorIndicador,
+                                  color: colorTarjeta,
                                 ),
                               ),
                               const SizedBox(height: 2),
                               Text(
-                                ganadora.nombreEspanol,
-                                style: const TextStyle(
+                                tituloPrincipal,
+                                style: TextStyle(
                                   fontSize: 21,
                                   fontWeight: FontWeight.bold,
+                                  color: concluyente ? null : Colors.blueGrey.shade800,
                                 ),
                               ),
-                              Text(
-                                ganadora.nombreCientificoOComun,
-                                style: TextStyle(
-                                  fontSize: 13,
-                                  fontStyle: FontStyle.italic,
-                                  color: Colors.grey.shade700,
+                              if (!noEsHoja)
+                                Text(
+                                  ganadora.nombreCientificoOComun,
+                                  style: TextStyle(
+                                    fontSize: 13,
+                                    fontStyle: FontStyle.italic,
+                                    color: Colors.grey.shade700,
+                                  ),
                                 ),
-                              ),
                             ],
                           ),
                         ),
@@ -205,9 +325,9 @@ class _ResultScreenState extends State<ResultScreen> {
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
                         _ChipMetrica(
-                          etiqueta: 'Certeza del modelo',
+                          etiqueta: concluyente ? 'Certeza del modelo' : 'Certeza (baja)',
                           valor: '$porcentaje%',
-                          color: ganadora.colorIndicador,
+                          color: colorTarjeta,
                         ),
                         _ChipMetrica(
                           etiqueta: 'Tiempo de análisis',
@@ -216,42 +336,19 @@ class _ResultScreenState extends State<ResultScreen> {
                         ),
                       ],
                     ),
-                    const SizedBox(height: 16),
-                    const Text(
-                      'Síntomas identificados:',
-                      style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
-                    ),
-                    const SizedBox(height: 6),
-                    Text(
-                      ganadora.descripcionSintomas,
-                      style: const TextStyle(fontSize: 14, height: 1.4),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-            const SizedBox(height: 16),
-
-            // 4. Desglose de probabilidades de las 5 clases
-            Card(
-              elevation: 1,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-              child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text(
-                      'Distribución de probabilidades (YOLO11-cls)',
-                      style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
-                    ),
-                    const SizedBox(height: 12),
-                    for (final item in desgloseOrdenado) ...[
-                      _BarraProbabilidadClase(
-                        info: item.key,
-                        probabilidad: item.value,
+                    if (!noEsHoja) ...[
+                      const SizedBox(height: 16),
+                      Text(
+                        concluyente
+                            ? 'Síntomas identificados:'
+                            : 'Síntomas de la posible afección:',
+                        style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
                       ),
-                      const SizedBox(height: 8),
+                      const SizedBox(height: 6),
+                      Text(
+                        ganadora.descripcionSintomas,
+                        style: const TextStyle(fontSize: 14, height: 1.4),
+                      ),
                     ],
                   ],
                 ),
@@ -259,7 +356,40 @@ class _ResultScreenState extends State<ResultScreen> {
             ),
             const SizedBox(height: 16),
 
-            // 5. Notas opcionales y botón de guardado
+            // 4. Desglose de probabilidades de las 5 clases (no se muestra si
+            // la imagen no parece una hoja: serían cifras sin sentido)
+            if (!noEsHoja) ...[
+              Card(
+                elevation: 1,
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                child: Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'Probabilidad por afección',
+                        style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
+                      ),
+                      const SizedBox(height: 12),
+                      for (final item in desgloseOrdenado) ...[
+                        _BarraProbabilidadClase(
+                          info: item.key,
+                          probabilidad: item.value,
+                        ),
+                        const SizedBox(height: 8),
+                      ],
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(height: 16),
+            ],
+
+            const DescargoResponsabilidad(),
+            const SizedBox(height: 16),
+
+            // 5. Notas opcionales y botones de acción
             TextField(
               controller: _notasController,
               enabled: !_yaGuardado,
@@ -272,32 +402,97 @@ class _ResultScreenState extends State<ResultScreen> {
             ),
             const SizedBox(height: 18),
 
-            FilledButton.icon(
-              onPressed: _yaGuardado || _guardando ? null : _guardarDiagnostico,
-              icon: Icon(_yaGuardado ? Icons.check_rounded : Icons.save_rounded),
-              label: Text(
-                _yaGuardado
-                    ? 'Diagnóstico guardado en el historial'
-                    : (_guardando ? 'Guardando...' : 'Guardar Diagnóstico'),
-                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+            // Si el resultado no es concluyente, la acción principal es repetir
+            // la foto y guardar pasa a ser secundaria (queda marcado en el historial).
+            if (concluyente) ...[
+              _botonGuardar(principal: true),
+              const SizedBox(height: 8),
+              _botonOtroDiagnostico(principal: false),
+            ] else ...[
+              _botonOtroDiagnostico(principal: true),
+              const SizedBox(height: 8),
+              _botonGuardar(principal: false),
+            ],
+
+            // Tras guardar, acceso directo al historial.
+            if (_yaGuardado && widget.onVerHistorial != null) ...[
+              const SizedBox(height: 8),
+              OutlinedButton.icon(
+                onPressed: widget.onVerHistorial,
+                icon: const Icon(Icons.history_rounded),
+                label: const Text('Ver historial'),
+                style: OutlinedButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(vertical: 14),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                ),
               ),
-              style: FilledButton.styleFrom(
-                padding: const EdgeInsets.symmetric(vertical: 16),
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-              ),
-            ),
-            const SizedBox(height: 8),
-            OutlinedButton.icon(
-              onPressed: () => Navigator.of(context).pop(),
-              icon: const Icon(Icons.camera_alt_outlined),
-              label: const Text('Realizar otro diagnóstico'),
-              style: OutlinedButton.styleFrom(
-                padding: const EdgeInsets.symmetric(vertical: 14),
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-              ),
-            ),
+            ],
           ],
         ),
+      ),
+      ),
+    );
+  }
+
+  Widget _botonGuardar({required bool principal}) {
+    final String texto;
+    if (_yaGuardado) {
+      texto = 'Diagnóstico guardado en el historial';
+    } else if (_guardando) {
+      texto = 'Guardando...';
+    } else {
+      texto = principal ? 'Guardar Diagnóstico' : 'Guardar de todos modos (queda marcado)';
+    }
+    final onPressed = _yaGuardado || _guardando ? null : _guardarDiagnostico;
+    final icono = Icon(_yaGuardado ? Icons.check_rounded : Icons.save_rounded);
+
+    if (principal) {
+      return FilledButton.icon(
+        onPressed: onPressed,
+        icon: icono,
+        label: Text(
+          texto,
+          style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+        ),
+        style: FilledButton.styleFrom(
+          padding: const EdgeInsets.symmetric(vertical: 16),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        ),
+      );
+    }
+    return OutlinedButton.icon(
+      onPressed: onPressed,
+      icon: icono,
+      label: Text(texto),
+      style: OutlinedButton.styleFrom(
+        padding: const EdgeInsets.symmetric(vertical: 14),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      ),
+    );
+  }
+
+  Widget _botonOtroDiagnostico({required bool principal}) {
+    if (principal) {
+      return FilledButton.icon(
+        onPressed: () => Navigator.of(context).pop(),
+        icon: const Icon(Icons.camera_alt_outlined),
+        label: const Text(
+          'Intentar con otra foto',
+          style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+        ),
+        style: FilledButton.styleFrom(
+          padding: const EdgeInsets.symmetric(vertical: 16),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        ),
+      );
+    }
+    return OutlinedButton.icon(
+      onPressed: () => Navigator.of(context).maybePop(),
+      icon: const Icon(Icons.camera_alt_outlined),
+      label: const Text('Realizar otro diagnóstico'),
+      style: OutlinedButton.styleFrom(
+        padding: const EdgeInsets.symmetric(vertical: 14),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
       ),
     );
   }

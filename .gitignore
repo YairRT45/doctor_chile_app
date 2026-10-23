@@ -43,3 +43,14 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# Configuraciones locales por máquina y credenciales de firma (NUNCA versionar)
+**/local.properties
+android/key.properties
+*.jks
+*.keystore
+
+# Pesos de entrenamiento duplicados (el modelo activo vive en assets/models/best.onnx)
+/modelo/**/*.pt
+/modelo/**/*.onnx
+

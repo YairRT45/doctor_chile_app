@@ -1,6 +1,11 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.CAMERA" />
 
+    <!-- La camara es opcional: sin ella se puede analizar una foto desde la galeria.
+         Sin estas lineas, Play Store ocultaria la app en dispositivos sin camara. -->
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
+
     <application
         android:label="Doctor Chile"
         android:name="${applicationName}"

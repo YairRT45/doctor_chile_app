@@ -1,0 +1,8 @@
+# Copia este archivo como `key.properties` (mismo directorio) y llena los datos
+# de TU keystore. `key.properties` y los .jks/.keystore estan ignorados por Git:
+# NUNCA los subas al repositorio ni los compartas. Ver docs/PUBLICAR.md.
+storePassword=CAMBIAR
+keyPassword=CAMBIAR
+keyAlias=upload
+# Ruta al keystore: absoluta, o relativa a android/app
+storeFile=C:/ruta/segura/doctor-chile-upload.jks

@@ -1,7 +1,12 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 
 import '../../../core/constants/chili_classes.dart';
+import '../../../core/errors/app_errors.dart';
+import '../../../core/widgets/descargo_responsabilidad.dart';
+import '../domain/diagnosis_classifier.dart';
 import '../services/yolo_service.dart';
 import 'result_screen.dart';
 
@@ -9,9 +14,14 @@ import 'result_screen.dart';
 class HomeScreen extends StatefulWidget {
   final VoidCallback onAbrirHistorial;
 
+  /// Clasificador de hojas. Por defecto el modelo ONNX real; se puede
+  /// inyectar un doble en pruebas.
+  final DiagnosisClassifier? clasificador;
+
   const HomeScreen({
     super.key,
     required this.onAbrirHistorial,
+    this.clasificador,
   });
 
   @override
@@ -22,31 +32,67 @@ class _HomeScreenState extends State<HomeScreen> {
   final ImagePicker _picker = ImagePicker();
   bool _analizando = false;
 
+  DiagnosisClassifier get _clasificador =>
+      widget.clasificador ?? YoloService.instance;
+
   @override
   void initState() {
     super.initState();
     // Pre-cargar el modelo ONNX en segundo plano al abrir la app
-    YoloService.instance.inicializar().catchError((_) {});
+    _clasificador.inicializar().catchError((Object e, StackTrace st) {
+      registrarError(e, st, 'Pre-carga del modelo');
+    });
+
+    // En Android el sistema puede destruir la app mientras la cámara está
+    // abierta (poca memoria). Al reiniciar, se recupera la foto pendiente.
+    if (Platform.isAndroid) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _flujoDiagnostico(_recuperarCapturaPerdida);
+      });
+    }
+  }
+
+  /// Devuelve la ruta de una foto tomada antes de que la app se reiniciara, o
+  /// `null` si no hay ninguna pendiente.
+  Future<String?> _recuperarCapturaPerdida() async {
+    final respuesta = await _picker.retrieveLostData();
+    if (respuesta.isEmpty) return null;
+    if (respuesta.exception != null) {
+      registrarError(respuesta.exception!, null, 'Recuperación de captura perdida');
+      return null;
+    }
+    final archivo = respuesta.files?.isNotEmpty == true
+        ? respuesta.files!.first
+        : respuesta.file;
+    return archivo?.path;
   }
 
   /// Ejecuta el flujo normal (FN: Cámara) o alternativo (FA.1: Galería) de CU-01.
-  Future<void> _capturarYAnalizar(ImageSource fuente) async {
-    if (_analizando) return;
-
-    try {
+  Future<void> _capturarYAnalizar(ImageSource fuente) {
+    return _flujoDiagnostico(() async {
       final XFile? archivo = await _picker.pickImage(
         source: fuente,
         maxWidth: 1280,
         maxHeight: 1280,
         imageQuality: 92,
       );
+      return archivo?.path; // null si el agricultor canceló la captura
+    });
+  }
 
-      if (archivo == null) return; // El agricultor canceló la captura
+  /// Obtiene una foto con [obtenerRuta], la analiza y muestra el resultado.
+  Future<void> _flujoDiagnostico(Future<String?> Function() obtenerRuta) async {
+    if (_analizando) return;
+
+    try {
+      final ruta = await obtenerRuta();
+      if (ruta == null) return;
+      if (!mounted) return;
 
       setState(() => _analizando = true);
 
       // FN.4: El sistema analiza la imagen con YOLO11 On-Device
-      final resultado = await YoloService.instance.analizarImagen(archivo.path);
+      final resultado = await _clasificador.analizarImagen(ruta);
 
       if (!mounted) return;
       setState(() => _analizando = false);
@@ -55,28 +101,35 @@ class _HomeScreenState extends State<HomeScreen> {
       await Navigator.of(context).push(
         MaterialPageRoute(
           builder: (_) => ResultScreen(
-            imagePath: archivo.path,
+            imagePath: ruta,
             resultado: resultado,
+            onVerHistorial: widget.onAbrirHistorial,
           ),
         ),
       );
-    } catch (e) {
-      // FE.1: Error interno durante el análisis de la imagen
+    } catch (e, st) {
+      // FE.1: Error interno durante el análisis de la imagen. El detalle
+      // técnico va al log; al usuario se le muestra un mensaje comprensible.
+      registrarError(e, st, 'Error al analizar la imagen');
       if (!mounted) return;
       setState(() => _analizando = false);
 
-      showDialog(
+      await showDialog<void>(
         context: context,
         builder: (ctx) => AlertDialog(
           title: const Row(
             children: [
               Icon(Icons.error_outline_rounded, color: Colors.red),
               SizedBox(width: 10),
-              Expanded(child: Text('Error al procesar la imagen')),
+              Expanded(child: Text('No se pudo analizar la imagen')),
             ],
           ),
           content: Text(
-            'Ocurrió un error al analizar la fotografía con el modelo local.\n\nDetalle: $e',
+            mensajeAmigable(
+              e,
+              porDefecto:
+                  'Ocurrió un problema al analizar la fotografía. Intente de nuevo con otra imagen.',
+            ),
           ),
           actions: [
             TextButton(
@@ -141,7 +194,7 @@ class _HomeScreenState extends State<HomeScreen> {
                       ),
                       SizedBox(height: 10),
                       Text(
-                        'Cultivos de Chile Guajillo / Mirasol (Capsicum annuum).\nFunciona 100% sin conexión a internet.',
+                        'Cultivos de Chile Guajillo / Mirasol (Capsicum annuum).',
                         style: TextStyle(
                           color: Colors.white70,
                           fontSize: 14,
@@ -223,7 +276,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
                 // Guía rápida de captura y catálogo de clases soportadas
                 const Text(
-                  'Afecciones que detecta el modelo (YOLO11):',
+                  'Afecciones que puede identificar la aplicación:',
                   style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
                 ),
                 const SizedBox(height: 10),
@@ -245,6 +298,8 @@ class _HomeScreenState extends State<HomeScreen> {
                       subtitle: Text(clase.nombreCientificoOComun),
                     ),
                   ),
+                const SizedBox(height: 8),
+                const DescargoResponsabilidad(),
               ],
             ),
           ),
@@ -264,7 +319,7 @@ class _HomeScreenState extends State<HomeScreen> {
                         CircularProgressIndicator(),
                         SizedBox(height: 16),
                         Text(
-                          'Analizando hoja con YOLO11...',
+                          'Analizando la hoja...',
                           style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
                         ),
                       ],

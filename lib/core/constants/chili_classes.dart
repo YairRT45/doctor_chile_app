@@ -82,19 +82,40 @@ class ChiliClasses {
     ),
   ];
 
+  /// Clase neutra para claves/índices que no pertenecen al modelo actual.
+  /// Nunca se considera sana: no debe confundirse con un resultado favorable.
+  static const ChiliClassInfo desconocida = ChiliClassInfo(
+    index: -1,
+    key: 'Unknown',
+    nombreEspanol: 'Afección no reconocida',
+    nombreCientificoOComun: 'Sin información disponible',
+    descripcionSintomas:
+        'Este registro corresponde a una clase que la versión actual de la aplicación no reconoce.',
+    colorIndicador: Color(0xFF6B7280), // Gris neutro
+    icono: Icons.help_outline_rounded,
+  );
+
   /// Busca la información de una clase por su índice numérico (0..4).
-  static ChiliClassInfo porIndice(int index) {
-    return todas.firstWhere(
-      (c) => c.index == index,
-      orElse: () => todas[1],
-    );
+  /// Devuelve `null` si el índice no existe (nunca asume una clase por defecto).
+  static ChiliClassInfo? porIndice(int index) {
+    for (final c in todas) {
+      if (c.index == index) return c;
+    }
+    return null;
   }
 
   /// Busca la información de una clase por su clave en inglés ('Curl', 'Spot', etc.).
-  static ChiliClassInfo porClave(String key) {
-    return todas.firstWhere(
-      (c) => c.key.toLowerCase() == key.toLowerCase(),
-      orElse: () => todas[1],
-    );
+  /// Devuelve `null` si la clave no existe.
+  static ChiliClassInfo? porClave(String key) {
+    final buscada = key.toLowerCase();
+    for (final c in todas) {
+      if (c.key.toLowerCase() == buscada) return c;
+    }
+    return null;
   }
+
+  /// Igual que [porClave], pero devuelve [desconocida] si no hay coincidencia.
+  /// Pensado para pantallas que muestran registros guardados.
+  static ChiliClassInfo porClaveODesconocida(String key) =>
+      porClave(key) ?? desconocida;
 }

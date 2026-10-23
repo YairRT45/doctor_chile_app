@@ -4,15 +4,25 @@ import 'package:intl/intl.dart';
 
 import '../../../core/constants/chili_classes.dart';
 import '../../../core/database/local_database.dart';
+import '../../../core/errors/app_errors.dart';
+import '../../../core/widgets/descargo_responsabilidad.dart';
 import '../../diagnosis/domain/diagnosis_record.dart';
+import '../../diagnosis/domain/diagnosis_repository.dart';
+import '../../diagnosis/domain/estado_resultado.dart';
+import '../../diagnosis/presentation/estado_badge.dart';
 
 /// Vista de detalle de un diagnóstico almacenado en la base de datos local.
 class DetailScreen extends StatelessWidget {
   final DiagnosisRecord registro;
 
+  /// Repositorio de persistencia. Por defecto SQLite; se puede inyectar un
+  /// doble en pruebas.
+  final DiagnosisRepository? repositorio;
+
   const DetailScreen({
     super.key,
     required this.registro,
+    this.repositorio,
   });
 
   Future<void> _confirmarEliminacion(BuildContext context) async {
@@ -38,10 +48,28 @@ class DetailScreen extends StatelessWidget {
     );
 
     if (confirmar == true && registro.id != null) {
-      await LocalDatabase.instance.eliminarDiagnostico(
-        registro.id!,
-        registro.imagePath,
-      );
+      try {
+        await (repositorio ?? LocalDatabase.instance).eliminarDiagnostico(
+          registro.id!,
+          registro.imagePath,
+        );
+      } catch (e, st) {
+        registrarError(e, st, 'Error al eliminar el diagnóstico');
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              backgroundColor: Colors.red.shade700,
+              content: Text(
+                mensajeAmigable(
+                  e,
+                  porDefecto: 'No se pudo eliminar el diagnóstico. Intente de nuevo.',
+                ),
+              ),
+            ),
+          );
+        }
+        return;
+      }
       if (context.mounted) {
         Navigator.of(context).pop(true); // Indica al historial que recargue la lista
       }
@@ -50,7 +78,11 @@ class DetailScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final claseInfo = ChiliClasses.porClave(registro.diseaseKey);
+    final claseInfo = ChiliClasses.porClaveODesconocida(registro.diseaseKey);
+    // Un resultado dudoso usa color neutro para no parecer un diagnóstico firme.
+    final color = registro.estado == EstadoResultado.concluyente
+        ? claseInfo.colorIndicador
+        : Colors.blueGrey.shade600;
     final fechaFormateada = DateFormat('dd/MM/yyyy • HH:mm').format(registro.createdAt);
     final certezaPct = (registro.confidence * 100).toStringAsFixed(1);
     final archivoFoto = File(registro.imagePath);
@@ -92,7 +124,7 @@ class DetailScreen extends StatelessWidget {
               shape: RoundedRectangleBorder(
                 borderRadius: BorderRadius.circular(16),
                 side: BorderSide(
-                  color: claseInfo.colorIndicador.withValues(alpha: 0.5),
+                  color: color.withValues(alpha: 0.5),
                   width: 1.5,
                 ),
               ),
@@ -105,10 +137,10 @@ class DetailScreen extends StatelessWidget {
                       children: [
                         CircleAvatar(
                           radius: 24,
-                          backgroundColor: claseInfo.colorIndicador.withValues(alpha: 0.15),
+                          backgroundColor: color.withValues(alpha: 0.15),
                           child: Icon(
                             claseInfo.icono,
-                            color: claseInfo.colorIndicador,
+                            color: color,
                             size: 28,
                           ),
                         ),
@@ -118,7 +150,7 @@ class DetailScreen extends StatelessWidget {
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
                               Text(
-                                'ID de Registro: #${registro.id} (BR-01)',
+                                'ID de registro: #${registro.id}',
                                 style: TextStyle(
                                   fontSize: 12,
                                   fontWeight: FontWeight.bold,
@@ -126,8 +158,12 @@ class DetailScreen extends StatelessWidget {
                                 ),
                               ),
                               const SizedBox(height: 2),
+                              if (registro.estado != EstadoResultado.concluyente) ...[
+                                EstadoBadge(estado: registro.estado),
+                                const SizedBox(height: 4),
+                              ],
                               Text(
-                                registro.diseaseName,
+                                registro.tituloVisible,
                                 style: const TextStyle(
                                   fontSize: 20,
                                   fontWeight: FontWeight.bold,
@@ -148,7 +184,7 @@ class DetailScreen extends StatelessWidget {
                     const Divider(height: 28),
                     Row(
                       children: [
-                        Icon(Icons.verified_rounded, color: claseInfo.colorIndicador, size: 20),
+                        Icon(Icons.verified_rounded, color: color, size: 20),
                         const SizedBox(width: 8),
                         Text(
                           'Nivel de certeza: $certezaPct%',
@@ -159,16 +195,20 @@ class DetailScreen extends StatelessWidget {
                         ),
                       ],
                     ),
-                    const SizedBox(height: 14),
-                    const Text(
-                      'Descripción de síntomas:',
-                      style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      claseInfo.descripcionSintomas,
-                      style: const TextStyle(fontSize: 14, height: 1.4),
-                    ),
+                    if (registro.estado != EstadoResultado.noEsHoja) ...[
+                      const SizedBox(height: 14),
+                      Text(
+                        registro.estado == EstadoResultado.concluyente
+                            ? 'Descripción de síntomas:'
+                            : 'Síntomas de la posible afección:',
+                        style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        claseInfo.descripcionSintomas,
+                        style: const TextStyle(fontSize: 14, height: 1.4),
+                      ),
+                    ],
                     if (registro.notes != null && registro.notes!.isNotEmpty) ...[
                       const Divider(height: 28),
                       const Text(
@@ -185,6 +225,8 @@ class DetailScreen extends StatelessWidget {
                 ),
               ),
             ),
+            const SizedBox(height: 16),
+            const DescargoResponsabilidad(),
           ],
         ),
       ),
