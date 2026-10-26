@@ -6,14 +6,14 @@ clases) y el catálogo en `lib/core/constants/chili_classes.dart`. La prueba
 `test/model/model_doc_test.dart` falla si el archivo, el hash documentado o el
 orden de clases dejan de coincidir.
 
-## Identificación (`chili_v3` — Activo)
+## Identificación (`chili_v4` — Activo)
 
 | Campo | Valor |
 |---|---|
 | Archivo | `assets/models/best.onnx` |
-| SHA-256 | `6cdd091808f2883b007a958aa62d3cdc19b9ba09153979334cd0d9b021377501` |
-| Tamaño | 21 809 020 bytes (≈ 20.8 MB) |
-| Arquitectura | `yolo11s-cls` (Small, 5 440 533 parámetros fusionados, opset 17) |
+| SHA-256 | `8c0a3f11222b574dfff2233e2c11036c33b57a3e1ad124d95d38b2e527299991` |
+| Tamaño | 21 814 160 bytes (≈ 20.8 MB) |
+| Arquitectura | `yolo11s-cls` (Small, 5 441 814 parámetros fusionados, opset 17, 6 salidas) |
 | Identificador en la app | `best.onnx` (se guarda en cada diagnóstico como `model_version`) |
 
 > El SHA-256 se calcula con `Get-FileHash assets\models\best.onnx -Algorithm SHA256`
@@ -24,16 +24,18 @@ orden de clases dejan de coincidir.
 - **Entrada:** tensor `float32` `[1, 3, 224, 224]`, NCHW, RGB, valores 0.0–1.0.
   Preprocesado: corrige orientación EXIF, recorte cuadrado central y
   redimensionado a 224×224 con interpolación lineal.
-- **Salida:** vector `output0` de 5 valores `float32` (probabilidades ya
-  normalizadas con Softmax por la cabeza `Classify` de Ultralytics; suman 1.0).
-  Si en un modelo futuro fueran logits crudos, `normalizarProbabilidades` aplica
-  Softmax automáticamente.
-- La app valida en tiempo de ejecución que la salida tenga exactamente 5 valores
-  finitos y lanza un error en caso contrario (no asume ninguna clase por defecto).
+- **Salida:** vector `output0` de 6 valores `float32` (probabilidades ya
+  normalizadas con Softmax por la cabeza `Classify` de Ultralytics; suman 1.0):
+  los índices `0..4` corresponden a las 5 clases foliares y el índice `5`
+  corresponde a `Z_No_hoja` (rechazo explícito de imágenes no foliares, pasto
+  sintético, césped u objetos verdes).
+- La app valida en tiempo de ejecución que la salida tenga valores finitos y
+  dispara `EstadoResultado.noEsHoja` tanto si la proporción vegetal es baja como
+  si la red neuronal predice `Z_No_hoja` en el índice `5`.
 
 ## Orden de clases
 
-Es el orden que usa el código para interpretar la salida del modelo:
+Es el orden que usa el código para interpretar las 5 clases foliares del modelo:
 
 <!-- CLASES:INICIO -->
 0: Curl
@@ -43,60 +45,54 @@ Es el orden que usa el código para interpretar la salida del modelo:
 4: Yellowish
 <!-- CLASES:FIN -->
 
-> **Verificado (`chili_v3`):** el campo `names` guardado dentro de
-> `modelo/chili_v3/weights/best.pt` lista `Curl, Healthy, Spot, Whitefly,
-> Yellowish`, el mismo orden que usa el código, y coincide con los ejes de las
-> matrices de confusión en `modelo/chili_v3_test_eval/`.
+- **Índice adicional de rechazo (`5`):** `Z_No_hoja` (`indiceClaseNoHoja = 5` en
+  `lib/features/diagnosis/services/inference_utils.dart`). Cuando el índice `5`
+  obtiene la mayor probabilidad, `evaluarPrediccion` devuelve
+  `EstadoResultado.noEsHoja` sin importar el porcentaje de color verde.
 
-## Umbrales de decisión (en `inference_utils.dart`)
+> **Verificado (`chili_v4`):** el campo `names` guardado dentro de
+> `modelo/chili_v4/weights/best.pt` lista `Curl, Healthy, Spot, Whitefly,
+> Yellowish, Z_No_hoja`, conservando intactos los índices `0..4` de
+> `ChiliClasses` y coincidiendo con los ejes de las matrices de confusión en
+> `modelo/chili_v4_test_eval/`.
 
-| Umbral | Valor | Efecto |
+## Umbrales y defensas de decisión (en `inference_utils.dart`)
+
+| Defensa / Umbral | Valor | Efecto |
 |---|---|---|
-| Confianza mínima (`umbralConfianzaMinima`) | `0.70` | Por debajo: resultado `pocaConfianza` ("no concluyente") |
+| Clase neuronal `Z_No_hoja` (`indiceClaseNoHoja`) | Índice `5` ganador | Resultado `noEsHoja` (bloquea **99.67 % (`306/307`)** de trampas verdes como pasto sintético con caucho negro, césped y tela verde) |
 | Proporción mínima de píxeles foliares (`umbralVegetacionMinima`) | `0.15` | Por debajo: resultado `noEsHoja` ("no parece una hoja") |
+| Confianza mínima (`umbralConfianzaMinima`) | `0.70` | Por debajo: resultado `pocaConfianza` ("no concluyente") |
 
-Calibrados sobre objetos no foliares (`modelo/eval_externa/No_hoja/`): con
-`umbralVegetacionMinima = 0.15`, se bloquea el **94.1 % (`16/17`)** de imágenes
-no foliares antes de emitir un diagnóstico concluyente.
-
-## Entrenamiento de `chili_v3` (fuente: `modelo/chili_v3/`)
+## Entrenamiento de `chili_v4` (fuente: `modelo/chili_v4/`)
 
 | Campo | Valor |
 |---|---|
-| Arquitectura | `yolo11s-cls` (clasificación Small), preentrenada + evaluación con *Model Soup* (`0.5 * best.pt + 0.5 * last.pt`) |
+| Arquitectura | `yolo11s-cls` (clasificación Small, 6 clases), preentrenada + evaluación con *Model Soup* |
 | Épocas / lote / tamaño | 30 / 16 / 224×224 (`patience: 30`) |
 | Optimizador e hiperparámetros | `AdamW` (`lr0: 0.0004`, `lrf: 0.01`, `cos_lr: true`, `warmup_epochs: 2.0`, `dropout: 0.25`) |
-| Aumentos | HSV (`0.015/0.7/0.4`), rotación `±30°`, `flipud: 0.5`, `fliplr: 0.5`, `scale: 0.35`, `erasing: 0.15`, RandAugment |
-| Dataset (`Chili_Dataset_v3`) | **3 dominios balanceados deduplicados por `SHA-256` y agrupados por `dHash <= 10`** (0 % de fuga de datos entre particiones): `3 360` `train`, `419` `val`, `422` `test` (`4 201` imágenes efectivas) |
-| Dominios incluidos | 1) **Campo original** (`~1600×2100`, 5 clases), 2) **Indonesia** (`100×100`, 5 clases incluyendo `healthy`), 3) **PlantVillage** (`256×256`, balanceado 1:1 en `Healthy` y `Bacterial_spot` / `Spot`) |
-| Artefactos | `modelo/chili_v3/`, `modelo/chili_v3_test_eval/`, `modelo/chili_v3_eval_dataset_completo/` y `modelo/chili_v3_eval_no_vistas/` |
+| Preservación cromática | `auto_augment: None`, HSV moderado (`0.008/0.30/0.30`), rotación `±30°`, `flipud: 0.5`, `fliplr: 0.5`, `scale: 0.30`, `erasing: 0.10` |
+| Dataset (`Chili_Dataset_v4`) | **4 dominios deduplicados por `SHA-256` y agrupados por `dHash <= 10`** (0 % de fuga entre particiones): `3 856` `train`, `498` `val`, `501` `test` (`4 855` imágenes efectivas) |
+| Dominios incluidos | 1) **Campo original** (`~1600×2100`, 5 clases), 2) **Indonesia** (`100×100`, 5 clases), 3) **PlantVillage** (`256×256`, `Healthy` y `Spot` 1:1), 4) **`No_hoja_coleccion`** (`654` imágenes únicas: `307` trampas verdes, `204` campo sin hoja, `83` objetos cotidianos, `60` texturas) |
+| Artefactos | `modelo/chili_v4/`, `modelo/chili_v4_test_eval/` y `modelo/No_hoja_coleccion/` |
 
-## Evolución de métricas (`chili_v1` → `chili_v2` → `chili_v3`)
+## Evolución de métricas (`chili_v1` → `chili_v2` → `chili_v3` → `chili_v4`)
 
-### 1. Particiones oficiales libres de fugas (`Chili_Dataset_v3`: `val` + `test`)
+### 1. Particiones oficiales libres de fugas (`Chili_Dataset_v4`: `val` + `test`)
 
-| Split | Total | Dominio 1: Campo Original (`~1600×2100`) | Dominio 2: Indonesia (`100×100`) | Dominio 3: PlantVillage (`256×256`) |
+| Split | Total | Campo Original (`~1600×2100`) | Indonesia (`100×100`) | PlantVillage (`256×256`) | `No_hoja` Trampas Verdes | `No_hoja` Otros |
+|---|---:|---:|---:|---:|---:|---:|
+| `val` | **96.79 %** (`482/498`) | **100.0 %** (`241/241`) | **81.4 %** (`48/59`) | **95.8 %** (`114/119`) | **100.0 %** (`42/42`) | **100.0 %** (`37/37`) |
+| `test` | **96.41 %** (`483/501`) | **100.0 %** (`244/244`) | **81.4 %** (`48/59`) | **95.0 %** (`113/119`) | **97.6 %** (`41/42`) | **100.0 %** (`37/37`) |
+| **Combinado `val + test` (0 % fuga)** | **96.60 %** (`965/999`) | **100.0 %** (`485/485`) | **81.4 %** (`96/118`) | **95.4 %** (`227/238`) | **98.8 %** (`83/84`) | **100.0 %** (`74/74`) |
+
+### 2. Evaluación exhaustiva sobre las 5 colecciones (`8 635` imágenes)
+
+| Colección | Imágenes | `chili_v3` (5 clases) | `chili_v4` (Global) | `chili_v4` (Solo no vistas en `train`: `4 447`) |
 |---|---:|---:|---:|---:|
-| `val` | **96.18 %** (`403/419`) | **100.0 %** (`241/241`) | **79.7 %** (`47/59`) | **96.6 %** (`115/119`) |
-| `test` | **97.16 %** (`410/422`) | **100.0 %** (`244/244`) | **81.4 %** (`48/59`) | **99.2 %** (`118/119`) |
-| **Combinado `val + test` (0 % fuga)** | **96.67 %** (`813/841`) | **100.0 %** (`485/485`) | **80.5 %** (`95/118`) | **97.9 %** (`233/238`) |
-
-### 2. Evaluación exhaustiva sobre las 4 colecciones externas/locales (`7 981` imágenes)
-
-| Colección | Imágenes | `chili_v2` (Global) | `chili_v3` (Global) | `chili_v3` (Solo no vistas en `train`: `4 296`) |
-|---|---:|---:|---:|---:|
-| `1_PlantVillage_Raiz` (`256×256`) | 2 475 | 73.33 % | **99.88 %** (`2 472/2 475`) | **99.83 %** (`1 747/1 750`) |
-| `2_archive_1` (Combinado) | 3 006 | 74.78 % | **98.07 %** (`2 948/3 006`) | **97.47 %** (`1 890/1 939`) |
-| `3_archive_3` (`100×100`) | 500 | 75.00 % | **93.80 %** (`469/500`) | **81.51 %** (`97/119`) *(vs 40.2 % en v2)* |
-| `4_Con_este_voy_a_entrenar` | 2 000 | 100.00 % | **100.00 %** (`2 000/2 000`) | **100.00 %** (`488/488`) |
-| **TOTAL GLOBAL** | **7 981** | **80.67 %** (`6 438/7 981`) | **98.85 %** (`7 889/7 981`) | **98.28 %** (`4 222/4 296`) |
-
-### 3. Exactitud por clase de `chili_v3` en las `7 981` imágenes
-
-| Clase | Aciertos / Total (`7 981` imgs) | Exactitud `chili_v3` | Exactitud `chili_v2` |
-|---|---:|---:|---:|
-| `Spot` (Mancha foliar / bacteriana) | `2 657 / 2 664` | **99.74 %** | 50.00 % |
-| `Healthy` (Hoja sana — 3 dominios) | `3 486 / 3 517` | **99.12 %** | 96.00 % |
-| `Whitefly` (Mosca blanca) | `590 / 600` | **98.33 %** | 98.00 % |
-| `Curl` (Hoja rizada) | `580 / 600` | **96.67 %** | 97.00 % |
-| `Yellowish` (Amarillamiento) | `576 / 600` | **96.00 %** | 96.00 % |
+| `1_PlantVillage_Raiz` (`256×256`) | 2 475 | 99.88 % | **99.47 %** (`2 462/2 475`) | **99.43 %** (`1 736/1 746`) |
+| `2_archive_1` (Combinado) | 3 006 | 98.07 % | **96.94 %** (`2 914/3 006`) | **96.39 %** (`1 868/1 938`) |
+| `3_archive_3` (`100×100`) | 500 | 93.80 % | **91.40 %** (`457/500`) | **81.36 %** (`96/118`) |
+| `4_Con_este_voy_a_entrenar` | 2 000 | 100.00 % | **100.00 %** (`2 000/2 000`) | **100.00 %** (`487/487`) |
+| `5_No_hoja_coleccion` (Pasto sintético, objetos, tierra) | 654 | 0.00 % *(86 % falsos concluyentes en trampas verdes)* | **99.85 %** (`653/654`) | **99.37 %** (`157/158`) |
+| **TOTAL GLOBAL** | **8 635** | — | **98.27 %** (`8 486/8 635`) | **97.68 %** (`4 344/4 447`) |

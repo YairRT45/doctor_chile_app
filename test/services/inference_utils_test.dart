@@ -65,6 +65,21 @@ void main() {
       expect(e.estado, EstadoResultado.noEsHoja);
     });
 
+    test('chili_v4 (6 clases): si gana Z_No_hoja (índice 5) devuelve noEsHoja incluso con 85% de verde (pasto sintético)', () {
+      const trampaVerde = [0.02, 0.03, 0.04, 0.01, 0.02, 0.88];
+      final e = evaluarPrediccion(trampaVerde, 0.85);
+      expect(e.estado, EstadoResultado.noEsHoja);
+      expect(e.mensajeAdvertencia, isNotNull);
+    });
+
+    test('chili_v4 (6 clases): si gana una clase foliar (0..4) con confianza >= 70% es concluyente', () {
+      const hojaConcluyenteV4 = [0.02, 0.03, 0.82, 0.04, 0.04, 0.05];
+      final e = evaluarPrediccion(hojaConcluyenteV4, 0.50);
+      expect(e.indiceGanador, 2);
+      expect(e.estado, EstadoResultado.concluyente);
+      expect(e.mensajeAdvertencia, isNull);
+    });
+
     test('los umbrales son inclusivos hacia "concluyente"', () {
       final justo = [0.70, 0.075, 0.075, 0.075, 0.075];
       expect(

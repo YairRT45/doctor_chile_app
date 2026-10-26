@@ -1,4 +1,8 @@
+import 'dart:io';
+
+import 'package:flutter/services.dart';
 import 'package:flutter_onnxruntime/flutter_onnxruntime.dart';
+import 'package:path_provider/path_provider.dart';
 
 import '../../../core/constants/chili_classes.dart';
 import '../../../core/errors/app_errors.dart';
@@ -19,6 +23,7 @@ class YoloService implements DiagnosisClassifier {
   }
 
   static const String _assetPath = 'assets/models/best.onnx';
+  static const String _cachedFileName = 'best_chili_v4.onnx';
   static const String _versionModelo = 'best.onnx';
 
   final OnnxRuntime _ort = OnnxRuntime();
@@ -29,7 +34,39 @@ class YoloService implements DiagnosisClassifier {
 
   Future<OrtSession> _crearSesion() async {
     try {
-      return await _ort.createSessionFromAsset(_assetPath);
+      // Nota crítica: `createSessionFromAsset` de `flutter_onnxruntime` guarda
+      // `best.onnx` en `getTemporaryDirectory()` y NO lo sobrescribe al
+      // actualizar el APK (`if (!wasCached)`), dejando en caché modelos viejos
+      // (v1/v2/v3). Extraemos a un archivo con nombre de versión y limpiamos
+      // el `best.onnx` antiguo de la caché.
+      final tempDir = await getTemporaryDirectory();
+      final legacyCached = File(
+        '${tempDir.path}${Platform.pathSeparator}best.onnx',
+      );
+      if (await legacyCached.exists()) {
+        try {
+          await legacyCached.delete();
+        } catch (_) {}
+      }
+
+      final modelFile = File(
+        '${tempDir.path}${Platform.pathSeparator}$_cachedFileName',
+      );
+      if (!await modelFile.exists()) {
+        final data = await rootBundle.load(_assetPath);
+        final bytes = data.buffer.asUint8List(
+          data.offsetInBytes,
+          data.lengthInBytes,
+        );
+        final tmpFile = File('${modelFile.path}.tmp');
+        await tmpFile.writeAsBytes(bytes, flush: true);
+        if (await modelFile.exists()) {
+          await modelFile.delete();
+        }
+        await tmpFile.rename(modelFile.path);
+      }
+
+      return await _ort.createSession(modelFile.path);
     } catch (e) {
       throw ModeloNoDisponibleError(detalle: e.toString());
     }

@@ -9,6 +9,7 @@ import '../domain/estado_resultado.dart';
 
 const double umbralConfianzaMinima = 0.70; // 70% mínimo de certeza
 const double umbralVegetacionMinima = 0.15; // Al menos 15% de píxeles foliares (calibrado en Fase 5)
+const int indiceClaseNoHoja = 5; // Índice 5 ('Z_No_hoja') en el modelo de 6 clases (chili_v4)
 
 /// Verifica mediante espacio de color HSV si un píxel corresponde a tonos de
 /// hoja verde, hoja amarillenta (clorosis) o tejido foliar con manchas.
@@ -66,17 +67,21 @@ class EvaluacionPrediccion {
   });
 }
 
-/// Elige la clase ganadora y valida las defensas (proporción vegetal y umbral
-/// de confianza). Lanza [SalidaModeloInvalidaError] si la salida del modelo no
-/// coincide con las clases conocidas: nunca se asume una clase por defecto.
+/// Elige la clase ganadora y valida las defensas (proporción vegetal, clase
+/// explícita `Z_No_hoja` en el índice 5 y umbral de confianza). Lanza
+/// [SalidaModeloInvalidaError] si la salida del modelo no coincide con las
+/// clases conocidas (5 clases foliares o 6 incluyendo `Z_No_hoja`): nunca se
+/// asume una clase por defecto.
 EvaluacionPrediccion evaluarPrediccion(
   List<double> probs,
   double proporcionVegetal,
 ) {
-  if (probs.length != ChiliClasses.todas.length) {
+  final numClasesFoliares = ChiliClasses.todas.length;
+  if (probs.length != numClasesFoliares &&
+      probs.length != numClasesFoliares + 1) {
     throw SalidaModeloInvalidaError(
       detalle:
-          'El modelo devolvió ${probs.length} valores y la app espera ${ChiliClasses.todas.length}.',
+          'El modelo devolvió ${probs.length} valores y la app espera $numClasesFoliares (o ${numClasesFoliares + 1} con No_hoja).',
     );
   }
   if (probs.any((p) => !p.isFinite)) {
@@ -85,31 +90,35 @@ EvaluacionPrediccion evaluarPrediccion(
     );
   }
 
-  int bestIdx = 0;
-  double bestProb = probs[0];
-  for (int i = 1; i < probs.length; i++) {
-    if (probs[i] > bestProb) {
-      bestProb = probs[i];
-      bestIdx = i;
+  int bestLeafIdx = 0;
+  double bestLeafProb = probs[0];
+  for (int i = 1; i < numClasesFoliares; i++) {
+    if (probs[i] > bestLeafProb) {
+      bestLeafProb = probs[i];
+      bestLeafIdx = i;
     }
   }
+
+  final bool modeloDetectaNoHoja =
+      probs.length > indiceClaseNoHoja &&
+      probs[indiceClaseNoHoja] >= bestLeafProb;
 
   EstadoResultado estado = EstadoResultado.concluyente;
   String? advertencia;
 
-  if (proporcionVegetal < umbralVegetacionMinima) {
+  if (proporcionVegetal < umbralVegetacionMinima || modeloDetectaNoHoja) {
     estado = EstadoResultado.noEsHoja;
     advertencia =
-        'La imagen no parece contener una hoja de chile (baja presencia de tonos foliares). Por favor acerque la cámara a la hoja.';
-  } else if (bestProb < umbralConfianzaMinima) {
+        'La imagen no parece contener una hoja de chile (baja presencia de tonos o anatomía foliar). Por favor acerque la cámara a la hoja.';
+  } else if (bestLeafProb < umbralConfianzaMinima) {
     estado = EstadoResultado.pocaConfianza;
     advertencia =
-        'El nivel de certeza (${(bestProb * 100).toStringAsFixed(1)}%) es bajo. Intente tomar la fotografía con mejor iluminación y enfocando una sola hoja.';
+        'El nivel de certeza (${(bestLeafProb * 100).toStringAsFixed(1)}%) es bajo. Intente tomar la fotografía con mejor iluminación y enfocando una sola hoja.';
   }
 
   return EvaluacionPrediccion(
-    indiceGanador: bestIdx,
-    confianza: bestProb,
+    indiceGanador: bestLeafIdx,
+    confianza: modeloDetectaNoHoja ? probs[indiceClaseNoHoja] : bestLeafProb,
     estado: estado,
     mensajeAdvertencia: advertencia,
   );
